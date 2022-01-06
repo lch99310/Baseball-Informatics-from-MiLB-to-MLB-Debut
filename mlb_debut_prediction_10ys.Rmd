@@ -1,0 +1,2572 @@
+---
+title: 'From MiLB to MLB Debut: a Machine Learning Approach'
+author: "Chung-Hao Lee"
+date: "01/05/2022"
+output:
+  pdf_document: default
+---
+
+```{r}
+#loading libraries
+library("tidyverse") # for data processing
+library("tidymodels") # for the resample, recipe, workflow package
+library("parsnip") # for the XGB, RF and DT models
+library("kernlab") # for the SVM model
+library("glmnet") # for lasso regression
+```
+
+```{r}
+#loading dataset and do data preparation
+df_mlb <-
+  read_csv("/Users/yginger/Desktop/Maryland/GA/Adam/Fall 2021/MLB_debut_prediction/data/mlb_draft_01to10.csv") %>% 
+  mutate(mlb_debut = as.factor(mlb_debut),
+         sch_reg = as.factor(sch_reg),
+         birth_place = as.factor(birth_place),
+         team = as.factor(team),
+         position = as.factor(position),
+         schooltype = as.factor(schooltype),
+         bats = as.factor(bats),
+         throws = as.factor(throws),
+         bmi = weight/(height/100)^2,
+         hr_ab = hr/ab,
+         iso = slg - avg,
+         bb_so = bb/so,
+         sbr = sb/(sb+cs)) %>% 
+  rename(age = age_at_draft,
+         overall_pick = draft_overall,
+         round = draft_round,
+         year = draft_year,
+         b2 = dbl,
+         b3 = tpl
+         ) 
+  
+```
+
+```{r}
+#Turn every na to 0 in sbr column
+df_mlb$sbr <- replace_na(df_mlb$sbr, 0)
+```
+
+```{r}
+# Calculate proportion of each category
+df_mlb %>% 
+  count(mlb_debut) %>% 
+  mutate(prop = n/sum(n))
+```
+
+
+
+# EDA
+```{r}
+### Distributed by teams with percentage
+df_mlb_team <-
+  df_mlb %>%
+  group_by(team, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(team) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(team_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -team_prop)
+
+
+ggplot(df_mlb_team)+
+  geom_col(mapping = aes(x = team, y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_point(mapping = aes(x = factor(team), y = team_prop*150), color = 'black', alpha = 0.5, size = 1) +
+  geom_text(mapping = aes(x = factor(team), y = team_prop*150, label = team_prop), vjust = -1, size = 2.5)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 150, name = "MLB debut percentage")) +
+  labs(x = "Team", y = "Number of players", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by positions
+df_mlb_position <-
+  df_mlb %>%
+  group_by(position, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(position) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(positions_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -positions_prop)
+
+
+ggplot(df_mlb_position)+
+  geom_col(mapping = aes(x = factor(position, level = c('IF', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'OF')), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_point(mapping = aes(x = factor(position, level = c('IF', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'OF')), y = positions_prop*1250), color = 'black', alpha = 0.5, size = 1) +
+  geom_text(mapping = aes(x = factor(position, level = c('IF', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'OF')), y = positions_prop*1250, label = positions_prop), vjust = -1, alpha = 0.8)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ ./1250 , name = "MLB debut percentage"), limits = c(0,1200)) +
+  labs(x = "Position", y = "Number of players", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right")+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by ages with percentage
+df_mlb_age <-
+  df_mlb %>%
+  group_by(age, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(age) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(age_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -age_prop)
+
+
+ggplot(df_mlb_age)+
+  geom_col(mapping = aes(x = as.factor(age), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(mapping = aes(x = as.factor(age), y = age_prop*1250, group = 1), color = 'black') +
+  geom_point(mapping = aes(x = as.factor(age), y = age_prop*1250), color = 'black', size = 0.6) +
+  geom_text(mapping = aes(x = as.factor(age), y = age_prop*1250, label = age_prop), vjust = -1)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ ./1250 , name = "MLB debut percentage"), limits = c(0,1200)) +
+  labs(x = "Age", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right")+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by bats with percentage
+df_mlb_bats <-
+  df_mlb %>%
+  group_by(bats, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(bats) %>%
+  mutate(bats_prop = round(n / sum(n), digits = 2)) %>%
+  filter(mlb_debut == "yes") 
+
+
+ggplot()+
+  geom_bar(data = df_mlb, mapping = aes(x = bats, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_point(data = df_mlb_bats, mapping = aes(x = bats, y = bats_prop*2500), color = 'black') +
+  geom_text(data = df_mlb_bats, mapping = aes(x = bats, y = bats_prop*2500, label = bats_prop), vjust = -1)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 2500, name = "MLB debut percentage"), limits = c(0,2400)) +
+  labs(x = "Bats", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right")+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by throws with percentage
+df_mlb_throw <-
+  df_mlb %>%
+  group_by(throws, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(throws) %>%
+  mutate(throw_prop = round(n / sum(n), digits = 2)) %>%
+  filter(mlb_debut == "yes") 
+
+
+ggplot()+
+  geom_bar(data = df_mlb, mapping = aes(x = throws, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_point(data = df_mlb_throw, mapping = aes(x = throws, y = throw_prop*3500), color = 'black') +
+  geom_text(data = df_mlb_throw, mapping = aes(x = throws, y = throw_prop*3500, label = throw_prop), vjust = -1)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 3500, name = "MLB debut percentage"), limits = c(0,3500), n.breaks = 7) +
+  labs(x = "Throws", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right")+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by year with percentage
+df_mlb_year <-
+  df_mlb %>%
+  group_by(year, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(year) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(year_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -year_prop)
+
+
+ggplot(df_mlb_year)+
+  geom_col( mapping = aes(x = as.factor(year), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(mapping = aes(x = as.factor(year), y = year_prop*400, group = 1), color = 'black') +
+  geom_point(mapping = aes(x = as.factor(year), y = year_prop*400), color = 'black', size = 0.6) +
+  geom_text(mapping = aes(x = as.factor(year), y = year_prop*400, label = year_prop), vjust = -1)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 400, name = "MLB debut percentage")) +
+  labs(x = "Draft Year", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right")+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by height with percentage
+df_mlb_height <-
+  df_mlb %>%
+  mutate(height_group = ifelse(height<170, "170-", ifelse(height>=170 & height <175, "170-174", ifelse(height>=175 & height <180, "175-180", ifelse(height>=180 & height <185, "180-185", ifelse(height>=185 & height <190, "185-190", ifelse(height>=190 & height <195, "190-195", ifelse(height>=195 & height < 200, "195-200", "200+")))))))) %>% 
+  group_by(height_group, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(height_group) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(height_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -height_prop)
+
+
+ggplot(df_mlb_height)+
+  geom_col( mapping = aes(x = as.factor(height_group), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(mapping = aes(x = as.factor(height_group), y = height_prop*1500, group = 1), color = 'black') +
+  geom_point(mapping = aes(x = as.factor(height_group), y = height_prop*1500), color = 'black', size = 0.6) +
+  geom_text(mapping = aes(x = as.factor(height_group), y = height_prop*1500, label = height_prop), vjust = -1)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 1500, name = "MLB debut percentage"), limits = c(0,1500), breaks = c(0, 375, 750, 1125, 1500)) +
+  labs(x = "Height", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by weight with percentage (new ver.)
+df_mlb_weight <-
+  df_mlb %>%
+  mutate(weight_group = ifelse(weight>=60 & weight <70, "60-69", ifelse(weight>=70 & weight <80, "70-79", ifelse(weight>=80 & weight <90, "80-89", ifelse(weight>=90 & weight <100, "90-99", ifelse(weight>=100 & weight <110, "100-109", ifelse(weight>=110 & weight < 120, "110-119", "120+"))))))) %>% 
+  group_by(weight_group, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(weight_group) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(weight_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -weight_prop)
+
+
+
+ggplot(df_mlb_weight)+
+  geom_col( mapping = aes(x = factor(weight_group, level = c("60-69", "70-79", "80-89", "90-99", "100-109", "110-119", "120+")), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(mapping = aes(x = factor(weight_group, level = c("60-69", "70-79", "80-89", "90-99", "100-109", "110-119", "120+")), y = weight_prop*1600, group = 1), color = 'black') +
+  geom_point(mapping = aes(x = factor(weight_group, level = c("60-69", "70-79", "80-89", "90-99", "100-109", "110-119", "120+")), y = weight_prop*1600), color = 'black', size = 0.6) +
+  geom_text(mapping = aes(x = factor(weight_group, level = c("60-69", "70-79", "80-89", "90-99", "100-109", "110-119", "120+")), y = weight_prop*1600, label = weight_prop), vjust = -1)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 1600, name = "MLB debut percentage"), limits = c(0,1600), breaks = c(0, 400, 800, 1200, 1600)) +
+  labs(x = "Weight", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by bmi with percentage
+df_mlb_bmi <-
+  df_mlb %>%
+  mutate(bmi_group = ifelse(bmi>=20 & bmi <22, "20-22", ifelse(bmi>=22 & bmi <24, "22-24", ifelse(bmi>=24 & bmi <26, "24-26", ifelse(bmi>=26 & bmi <28, "26-28", ifelse(bmi>=28 & bmi <30, "28-30", "30+")))))) %>% 
+  group_by(bmi_group, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(bmi_group) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(bmi_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -bmi_prop)
+
+
+ggplot(df_mlb_bmi)+
+  geom_col( mapping = aes(x = as.factor(bmi_group), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(mapping = aes(x = as.factor(bmi_group), y = bmi_prop*1500, group = 1), color = 'black') +
+  geom_point(mapping = aes(x = as.factor(bmi_group), y = bmi_prop*1500), color = 'black', size = 0.6) +
+  geom_text(mapping = aes(x = as.factor(bmi_group), y = bmi_prop*1500, label = bmi_prop), vjust = -1)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 1500, name = "MLB debut percentage"), limits = c(0,1500), n.breaks = 5) +
+  labs(x = "BMI", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by avg with percentage
+df_mlb_avg <-
+  df_mlb %>%
+  mutate(avg_group = ifelse(avg <0.1, "100-", ifelse(avg>=0.1 & avg <0.15, "100-150", ifelse(avg>=0.15 & avg <0.2, "150-200", ifelse(avg>=0.2 & avg <0.25, "200-250", ifelse(avg>=0.25 & avg <0.3, "250-300", "300+")))))) %>% 
+  group_by(avg_group, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(avg_group) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(avg_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -avg_prop)
+
+
+
+ggplot(df_mlb_avg)+
+  geom_col( mapping = aes(x = factor(avg_group, level = c("100-", "100-150", "150-200", "200-250", "250-300", "300+")), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(mapping = aes(x = factor(avg_group, level = c("100-", "100-150", "150-200", "200-250", "250-300", "300+")), y = avg_prop*1600, group = 1), color = 'black') +
+  geom_point(mapping = aes(x = factor(avg_group, level = c("100-", "100-150", "150-200", "200-250", "250-300", "300+")), y = avg_prop*1600), color = 'black', size = 0.6) +
+  geom_text(mapping = aes(x = factor(avg_group, level = c("100-", "100-150", "150-200", "200-250", "250-300", "300+")), y = avg_prop*1600, label = avg_prop), vjust = -1)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 1600, name = "MLB debut percentage"), limits = c(0,1600), breaks = c(0, 400, 800, 1200, 1600)) +
+  labs(x = "AVG", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by obp with percentage
+df_mlb_obp <-
+  df_mlb %>%
+  mutate(obp_group = ifelse(obp <0.2, "200-", ifelse(obp>=0.2 & obp <0.25, "200-250", ifelse(obp>=0.25 & obp <0.3, "250-300", ifelse(obp>=0.3 & obp <0.35, "300-350", ifelse(obp>=0.35 & obp <0.4, "350-400", "400+")))))) %>% 
+  group_by(obp_group, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(obp_group) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(obp_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -obp_prop)
+
+
+ggplot(df_mlb_obp)+
+  geom_col( mapping = aes(x = as.factor(obp_group), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(mapping = aes(x = as.factor(obp_group), y = obp_prop*2000, group = 1), color = 'black') +
+  geom_point( mapping = aes(x = as.factor(obp_group), y = obp_prop*2000), color = 'black', size = 0.6) +
+  geom_text(mapping = aes(x = as.factor(obp_group), y = obp_prop*2000, label = obp_prop), vjust = -1)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 2000, name = "MLB debut percentage")) +
+  labs(x = "OBP", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by slg with percentage
+df_mlb_slg <-
+  df_mlb %>%
+  mutate(slg_group = ifelse(slg <0.3, "300-", ifelse(slg>=0.3 & slg <0.35, "300-350", ifelse(slg>=0.35 & slg <0.4, "350-400", ifelse(slg>=0.4 & slg <0.45, "400-450", ifelse(slg>=0.45 & slg <0.5, "450-500", "500+")))))) %>%  
+  group_by(slg_group, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(slg_group) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(slg_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -slg_prop)
+
+
+ggplot(df_mlb_slg)+
+  geom_col( mapping = aes(x = as.factor(slg_group), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(mapping = aes(x = as.factor(slg_group), y = slg_prop*1200, group = 1), color = 'black') +
+  geom_point(mapping = aes(x = as.factor(slg_group), y = slg_prop*1200), color = 'black', size = 0.6) +
+  geom_text(mapping = aes(x = as.factor(slg_group), y = slg_prop*1200, label = slg_prop), vjust = -1)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 1200, name = "MLB debut percentage"), limits = c(0,1200), breaks = c(0, 300, 600, 900, 1200)) +
+  labs(x = "SLG", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by iso with percentage new
+df_mlb_iso <-
+  df_mlb %>%
+  mutate(iso_group = ifelse(iso <0.1, "0-100", ifelse(iso>=0.1 & iso <0.125, "100-125", ifelse(iso>=0.125 & iso <0.15, "125-150", ifelse(iso>=0.15 & iso <0.175, "150-175", ifelse(iso>=0.175 & iso <0.2, "175-200", "200+")))))) %>%  
+  group_by(iso_group, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(iso_group) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(iso_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -iso_prop)
+
+
+ggplot(df_mlb_iso)+
+  geom_col( mapping = aes(x = factor(iso_group, level = c("0-100", "100-125", "125-150", "150-175", "175-200", "200+")), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(mapping = aes(x = factor(iso_group, level = c("0-100", "100-125", "125-150", "150-175", "175-200", "200+")), y = iso_prop*1800, group = 1), color = 'black') +
+  geom_point(mapping = aes(x = factor(iso_group, level = c("0-100", "100-125", "125-150", "150-175", "175-200", "200+")), y = iso_prop*1800), color = 'black', size = 0.6) +
+  geom_text(mapping = aes(x = factor(iso_group, level = c("0-100", "100-125", "125-150", "150-175", "175-200", "200+")), y = iso_prop*1800, label = iso_prop), vjust = -0.5)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 1800, name = "MLB debut percentage"), limits = c(0,1750), breaks = c(0, 450, 900, 1350, 1800)) +
+  labs(x = "ISO", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by ops with percentage
+df_mlb_ops <-
+  df_mlb %>%
+  mutate(ops_group = ifelse(ops <0.5, "500-", ifelse(ops>=0.5 & ops <0.6, "500-600", ifelse(ops>=0.6 & ops <0.7, "600-700", ifelse(ops>=0.7 & ops <0.8, "700-800", ifelse(ops>=0.8 & ops <0.9, "800-900", "900+")))))) %>%  
+  group_by(ops_group, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(ops_group) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(ops_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -ops_prop)
+
+ggplot(df_mlb_ops)+
+  geom_col( mapping = aes(x = as.factor(ops_group), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(data = df_mlb_ops, mapping = aes(x = as.factor(ops_group), y = ops_prop*1500, group = 1), color = 'black') +
+  geom_point(data = df_mlb_ops, mapping = aes(x = as.factor(ops_group), y = ops_prop*1500), color = 'black', size = 0.6) +
+  geom_text(data = df_mlb_ops, mapping = aes(x = as.factor(ops_group), y = ops_prop*1500, label = ops_prop), vjust = -0.5)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 1500, name = "MLB debut percentage"), limits = c(0,1500), n.breaks = 5) +
+  labs(x = "OPS", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Among players who make MLB debut, what's their ops distribution by position  
+df_mlb %>% 
+  filter(mlb_debut == 'yes',
+         position == c("C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF")) %>% 
+  ggplot()+
+  geom_density(mapping = aes(x = ops, color = position), binwidth = 0.05)+
+  labs(x = "OPS", y ="Frequency", fill = "Position")+
+  theme_classic()+
+  theme(axis.text.x=element_text(angle=60, hjust=1))+
+  scale_color_brewer(palette = "Paired")
+
+
+df_mlb %>% 
+  mutate(ops_group = ifelse(ops <0.5, "500-", ifelse(ops>=0.5 & ops <0.6, "500-600", ifelse(ops>=0.6 & ops <0.7, "600-700", ifelse(ops>=0.7 & ops <0.8, "700-800", ifelse(ops>=0.8 & ops <0.9, "800-900", "900+")))))) %>% 
+  group_by(ops_group, position, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(ops_group, position) %>%
+  mutate(ops_pos_prop = n / sum(n)) %>% 
+  filter(mlb_debut == 'yes')
+```
+
+```{r}
+### Among players who make MLB debut, what's their ops distribution by position  
+df_mlb %>% 
+  mutate(ops_group = ifelse(ops <0.5, "500-", ifelse(ops>=0.5 & ops <0.6, "500-600", ifelse(ops>=0.6 & ops <0.7, "600-700", ifelse(ops>=0.7 & ops <0.8, "700-800", ifelse(ops>=0.8 & ops <0.9, "800-900", "900+")))))) %>% 
+  filter(mlb_debut == 'yes',
+         position == c("C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF")) %>% 
+  ggplot()+
+  geom_bar(mapping = aes(x = ops_group, fill = position), position = position_dodge2(width = 1, preserve = "single"))+
+  labs(x = "OPS", y ="Number of players", fill = "Position")+
+  theme_classic()+
+  theme(axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_brewer(palette = "Paired")
+
+
+df_mlb %>% 
+  mutate(ops_group = ifelse(ops <0.5, "500-", ifelse(ops>=0.5 & ops <0.6, "500-600", ifelse(ops>=0.6 & ops <0.7, "600-700", ifelse(ops>=0.7 & ops <0.8, "700-800", ifelse(ops>=0.8 & ops <0.9, "800-900", "900+")))))) %>% 
+  group_by(ops_group, position, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(ops_group, position) %>%
+  mutate(ops_pos_prop = n / sum(n)) %>% 
+  filter(mlb_debut == 'yes')
+```
+
+
+```{r}
+### Distributed by rounds with percentage
+df_mlb_round <-
+  df_mlb %>%
+  group_by(round, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(round) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(round_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -round_prop) 
+
+
+ggplot(df_mlb_round)+
+  geom_col(mapping = aes(x = as.factor(round), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_line(data = . %>% filter(round <=7), mapping = aes(x = round, y = round_prop*160, group = 1), color = '#663300', width = 3, alpha = 0.8) +
+  geom_point(data = . %>% filter(round <= 7), mapping = aes(x = as.factor(round), y = round_prop*160), color = 'black', alpha = 0.8, size = 0.1) +
+  geom_text(data = . %>% filter(round <= 7), mapping = aes(x = as.factor(round), y = round_prop*160, label = round_prop), vjust = -0.6, hjust = -0.05, alpha = 0.5)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 160, name = "MLB debut percentage"), limits = c(0,160), breaks = c(0, 40, 80, 120, 160)) +
+  labs(x = "Round", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Distributed by education type
+df_mlb_edutype <-
+  df_mlb %>%
+  group_by(schooltype, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(schooltype) %>%
+  spread(mlb_debut, n, fill = 0) %>%
+  mutate(edutype_prop = round(yes / (yes+no), 2)) %>%
+  gather(key = "mlb_debut", value = "count", no, yes, -edutype_prop) 
+
+ggplot(df_mlb_edutype)+
+  geom_col(mapping = aes(x = as.factor(schooltype), y = count, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  geom_point(mapping = aes(as.factor(schooltype), y = edutype_prop*2500), color = 'black') +
+  geom_text(mapping = aes(as.factor(schooltype), y = edutype_prop*2500, label = edutype_prop), vjust = -0.6, hjust = -0.05)+
+  scale_y_continuous("Number of players", sec.axis = sec_axis(trans =  ~ . / 2500, name = "MLB debut percentage")) +
+  labs(x = "Last School Type", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=60, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+  
+
+```
+
+```{r}
+### Distributed by school state 
+df_mlb %>% 
+  ggplot()+
+  geom_bar(mapping = aes(x = as.factor(sch_reg), fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  labs(x = "Last School Place", y = "Number of players", fill = "MLB")+
+  ggthemes::theme_hc()+
+  scale_y_continuous(breaks=c(0, 100, 200, 300, 400, 500, 600, 700), limits=c(0, 700))+
+  theme(legend.position="right", axis.text.x=element_text(angle=70, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+
+
+df_mlb %>% 
+  group_by(sch_reg, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(sch_reg) %>%
+  mutate(state_prop = n / sum(n)) %>% 
+  filter(mlb_debut == 'yes') %>% 
+  arrange(desc(state_prop))
+```
+
+```{r}
+### Distributed by birth place 
+df_mlb %>% 
+  ggplot()+
+  geom_bar(mapping = aes(x = as.factor(birth_place), fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  labs(x = "Birth Place", y = "Number of players", fill = "MLB")+
+  ggthemes::theme_hc()+
+  scale_y_continuous(breaks=c(0, 200, 400, 600, 800), limits=c(0, 800))+
+  theme(legend.position="right", axis.text.x=element_text(angle=90, size = 7))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+
+
+df_mlb %>% 
+  group_by(birth_place, mlb_debut) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(birth_place) %>%
+  mutate(bir_prop = n / sum(n)) %>% 
+  filter(mlb_debut == 'yes') %>% 
+  arrange(desc(bir_prop))
+```
+
+```{r}
+### Distributed by School
+df_mlb %>% 
+  ggplot()+
+  geom_bar(mapping = aes(x = as.factor(school), fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"))+
+  labs(x = "Last School Attended", y = "Number of players", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right", axis.text.x=element_text(angle=90, size = 3))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+
+```
+
+```{r}
+### AVG over year
+df_mlb %>% 
+  ggplot()+
+  geom_boxplot(mapping = aes(x = as.factor(year), y = avg, fill = mlb_debut), coef = 5)+
+  labs(x = "Draft Year", y = "AVG", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right")+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### OBP over year
+df_mlb %>% 
+  ggplot()+
+  geom_boxplot(mapping = aes(x = as.factor(year), y = obp, fill = mlb_debut), coef =5)+
+  labs(x = "Draft Year", y = "OBP", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right")+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### SLG over year
+df_mlb %>% 
+  ggplot()+
+  geom_boxplot(mapping = aes(x = as.factor(year), y = slg, fill = mlb_debut), coef =5)+
+  labs(x = "Draft Year", y = "SLG", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right")+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### OPS over year
+df_mlb %>% 
+  ggplot()+
+  geom_boxplot(mapping = aes(x = as.factor(year), y = ops, fill = mlb_debut), coef =5)+
+  labs(x = "Draft Year", y = "OPS", fill = "MLB")+
+  ggthemes::theme_hc()+
+  theme(legend.position="right")+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+### Age vs round
+df_mlb %>% 
+  ggplot()+
+  geom_smooth(mapping = aes(x = round, y = as.numeric(age), fill = mlb_debut), method = 'loess', color = "black")+
+  labs(x = "Round", y = "Age", fill = "MLB")+
+  scale_x_continuous(breaks = c(1:50))+
+  theme_classic()+
+  theme(legend.position="right", axis.text.x=element_text(angle=70, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+#TTO vs ISO
+df_mlb %>% 
+  mutate(iso = slg - avg,
+         iso_group = ifelse(iso <0.05, "0-50", ifelse(iso>=0.05 & iso <0.1, "50-100", ifelse(iso>=0.1 & iso <0.15, "100-150", ifelse(iso>=0.15 & iso <0.2, "150-200", ifelse(iso>=0.2 & iso <0.25, "200-250", "250+")))))) %>% 
+  ggplot(aes(x = factor(iso_group, level = c("0-50", "50-100", "100-150", "150-200", "200-250", "250+"))))+
+  geom_boxplot(mapping = aes( y = (hr+bb+so)/ab, fill = mlb_debut), position = position_dodge2(width = 1, preserve = "single"), coef = 5)+
+  labs(x = "ISO", y = "(HR+BB+SO)/AB", fill = "MLB")+
+  theme_light()+
+  theme(axis.text.x=element_text(angle=70, hjust=1))+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+#TTO through year 01 - 10
+df_mlb %>% 
+  ggplot()+
+  geom_smooth(mapping = aes(x = year, y = (hr+bb+so)/g, fill = mlb_debut), color = 'black',  method = "loess")+
+  labs(x = "Year", y = "(HR+BB+SO)/G", fill = "MLB")+
+  scale_x_continuous(breaks = c(2001:2010))+
+  theme_classic()+
+  theme(legend.position="right")+
+  scale_fill_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+
+
+# Variable selection
+#### Lasso for all variables
+```{r}
+#Prepare dataset for lasso for all variables
+df_mlb_lasso <- df_mlb %>% 
+  select(-name, -highLevel, -school) %>% 
+  mutate(team = as.numeric(team),
+         bats = as.numeric(bats),
+         throws = as.numeric(throws),
+         mlb_debut = as.numeric(mlb_debut),
+         schooltype = as.numeric(schooltype),
+         birth_place = as.numeric(birth_place),
+         sch_reg = as.numeric(sch_reg),
+         position = as.numeric(position))
+
+#Do normalization(0-1)
+df_mlb_lasso[c(1:12, 14:44)] = BBmisc::normalize(df_mlb_lasso[c(1:12, 14:44)], method = "range", range = c(0, 1))
+```
+
+```{r}
+df_mlb_lasso <- df_mlb_lasso %>% 
+  mutate(mlb_debut = as.factor(mlb_debut))
+
+x = model.matrix(mlb_debut~., df_mlb_lasso)[,-1]
+                                        
+y = df_mlb_lasso %>%
+  select(mlb_debut) %>%
+  unlist() %>%
+  as.numeric()
+```
+
+```{r}
+set.seed(123)
+lasso = glmnet(x = x, 
+               y = y, 
+               alpha = 1,
+               family = "binomial")
+
+plot(lasso, xvar='lambda', main="Lasso")
+```
+```{r}
+cv.lasso = cv.glmnet(x = x, 
+                     y = y, 
+                     alpha = 1,  # lasso
+                     family = "binomial")
+```
+
+```{r}
+#Selecting the best lambda
+best.lambda = cv.lasso$lambda.min
+best.lambda
+```
+
+```{r}
+#Plot the Lasso regression
+plot(lasso, xvar='lambda', main="Lasso")
+abline(v=log(best.lambda), col="blue", lty=5.5 )
+```
+
+```{r}
+#List out all variables and their coefficients
+coef(cv.lasso, s = "lambda.min")
+```
+
+
+#### Lasso for pre-selected variables
+```{r}
+#Prepare dataset for lasso for pre-selected variables
+df_mlb_lasso_s <- df_mlb %>% 
+  select(bats, age, bmi, round, overall_pick, team, avg, obp, slg, ops, iso, bb_so, hr_ab, sbr, ab, mlb_debut) %>% 
+  mutate(team = as.numeric(team),
+         bats = as.numeric(bats),
+         mlb_debut = as.numeric(mlb_debut))
+
+#Do normalization(0-1)
+df_mlb_lasso_s[c(1:15)] = BBmisc::normalize(df_mlb_lasso_s[c(1:15)], method = "range", range = c(0, 1))
+```
+
+```{r}
+df_mlb_lasso_s <- df_mlb_lasso_s %>% 
+  mutate(mlb_debut = as.factor(mlb_debut))
+
+x = model.matrix(mlb_debut~., df_mlb_lasso_s)[,-1]
+
+y = df_mlb_lasso_s %>%
+  select(mlb_debut) %>%
+  unlist() %>%
+  as.numeric()
+```
+
+```{r}
+set.seed(123)
+lasso = glmnet(x = x, 
+               y = y, 
+               alpha = 1,
+               family = "binomial")
+
+plot(lasso, xvar='lambda', main="Lasso")
+```
+```{r}
+cv.lasso = cv.glmnet(x = x, 
+                     y = y, 
+                     alpha = 1,  # lasso
+                     family = "binomial")
+```
+
+```{r}
+#Selecting the best lambda
+best.lambda = cv.lasso$lambda.min
+best.lambda
+```
+
+```{r}
+#Plot the Lasso regression
+plot(lasso, xvar='lambda', main="Lasso")
+abline(v=log(best.lambda), col="blue", lty=5.5 )
+```
+```{r}
+# List out all variables and their coefficients
+coef(cv.lasso, s = "lambda.min")
+```
+
+
+# Modeling
+## XGBoost
+```{r}
+# Prepare dataset for XGBoost
+df_mlb_xg <- df_mlb %>% 
+  select(-name, -highLevel, -school) %>% # Remove variables of name, highlevel and school
+  fastDummies::dummy_cols(select_columns = c( 'team', 'schooltype', 'bats', 'throws', 'position', 'sch_reg', 'birth_place'), remove_selected_columns = TRUE) # Converting the categorical variable into dummies
+
+str(df_mlb_xg)
+
+```
+
+```{r}
+# Set the seed
+set.seed(123)
+
+# Split the data into train and test
+df_split_xg <- initial_split(df_mlb_xg, strata = mlb_debut) #strata argument can help the training and test data sets will keep roughly the same proportions of mlb_debut = yes and no as in the original data.
+df_train_xg <- training(df_split_xg)
+df_test_xg <- testing(df_split_xg)
+```
+
+```{r}
+# create cross-validation resample for tuning the model.
+set.seed(123)
+dfa_folds_xgb <- vfold_cv(df_train_xg, v = 5, strata = mlb_debut)
+```
+
+```{r}
+# Create a XGBoost model object
+# model specification
+xgb_spec <- boost_tree(
+  trees = 1000,
+  tree_depth = tune(), 
+  min_n = tune(),
+  loss_reduction = tune(),
+  sample_size = tune(), 
+  mtry = tune(),
+  learn_rate = tune()
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification") %>% 
+  translate()
+```
+
+```{r}
+# set up possible values for these hyperparameters to try
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), df_train_xg),
+  learn_rate(),
+  size = 5)
+
+xgb_grid
+```
+
+
+#### XGB model with all variables
+```{r}
+# Create recipe 
+recipe_xgb_all <- 
+  recipe(mlb_debut ~ ., data = df_train_xg) %>% 
+  step_zv(all_predictors())
+
+
+# Create workflow
+xgb_workflow_all <- workflow() %>% 
+  add_recipe(recipe_xgb_all) %>% 
+  add_model(xgb_spec)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+xgb_res_all <- tune_grid(
+  xgb_workflow_all,
+  resamples = dfa_folds_xgb,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_auc_all <- select_best(xgb_res_all, "roc_auc")
+best_auc_all
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_xgb_all <- finalize_workflow(
+  xgb_workflow_all,
+  best_auc_all)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_xgb_all <-fit(final_xgb_all, data = df_train_xg)
+```
+
+```{r}
+# Apply model in the testing data
+results_xgb_all <- 
+  predict(fit_xgb_all, df_test_xg, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_xg, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_xgb_all <- conf_mat(results_xgb_all, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_xgb_all, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_xgb_all, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_xgb_all, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_xgb_all %>% 
+  ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+last_fit(final_xgb_all, split = df_split_xg) %>% 
+  pluck(".workflow", 1) %>%   
+  extract_fit_parsnip() %>% 
+  vip::vip(num_features = 10)
+  
+```
+
+
+#### XGB model with variables of lasso4all
+```{r}
+# Create recipe 
+recipe_xgb_lasso4all <- 
+  recipe(mlb_debut ~ . , data = df_train_xg) %>% 
+  step_rm(weight, year, round, g, r, b2, bb, pa, obp, slg, hr_ab, iso) %>% 
+  step_zv(all_predictors())
+
+# Create workflow
+xgb_workflow_lasso4all <- workflow() %>% 
+  add_recipe(recipe_xgb_lasso4all) %>% 
+  add_model(xgb_spec)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+xgb_res_lasso4all <- tune_grid(
+  xgb_workflow_lasso4all,
+  resamples = dfa_folds_xgb,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_auc_lasso4all <- select_best(xgb_res_lasso4all, "roc_auc")
+best_auc_lasso4all
+```
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_xgb_lasso4all <- finalize_workflow(
+  xgb_workflow_lasso4all,
+  best_auc_lasso4all
+)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_xgb_lasso4all <-fit(final_xgb_lasso4all, data = df_train_xg)
+```
+
+```{r}
+# Apply model in the testing data
+results_xgb_lasso4all <- 
+  predict(fit_xgb_lasso4all, df_test_xg, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_xg, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_xgb_lasso4all <- conf_mat(results_xgb_lasso4all, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_xgb_lasso4all, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_xgb_lasso4all, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_xgb_lasso4all, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_xgb_lasso4all %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+last_fit(final_xgb_lasso4all, split = df_split_xg) %>% 
+  pluck(".workflow", 1) %>%   
+  extract_fit_parsnip() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+#### XGBoost model with expert-selected variables 
+```{r}
+# Create recipe 
+recipe_xgb_selected_lch <- 
+  recipe(mlb_debut ~  bats_B + bats_L + bats_R + age + bmi  + round + overall_pick + team_ANA + team_ARI + team_ATL + team_BAL + team_BOS + team_CHA + team_CHN + team_CIN + team_CLE + team_COL + team_DET + team_HOU + team_KCA + team_LAN + team_MIA + team_MIL +  team_MIN + team_MON + team_NYA + team_NYN + team_OAK + team_PHI + team_PIT + team_SDN + team_SEA + team_SFN + team_SLN + team_TBA + team_TEX + team_TOR + team_WAS + avg + obp + slg + ops + iso + bb_so  + hr_ab +sbr + ab, data = df_train_xg) %>% 
+  step_zv(all_predictors())
+
+
+# Create workflow
+xgb_workflow_selected_lch <- workflow() %>% 
+  add_recipe(recipe_xgb_selected_lch) %>% 
+  add_model(xgb_spec)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+xgb_res_selected_lch <- tune_grid(
+  xgb_workflow_selected_lch,
+  resamples = dfa_folds_xgb,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_auc_selected_lch <- select_best(xgb_res_selected_lch, "roc_auc")
+best_auc_selected_lch
+```
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_xgb_selected_lch <- finalize_workflow(
+  xgb_workflow_selected_lch,
+  best_auc_selected_lch
+)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_xgb_selected_lch <-fit(final_xgb_selected_lch, data = df_train_xg)
+```
+
+```{r}
+# Apply model in the testing data
+results_xgb_selected_lch <- 
+  predict(fit_xgb_selected_lch, df_test_xg, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_xg, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_xgb_selected_lch <- conf_mat(results_xgb_selected_lch, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_xgb_selected_lch, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_xgb_selected_lch, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_xgb_selected_lch, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+#Plot predicted probability vs OPS
+results_xgb_selected_lch %>% 
+  ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+#Find out top10 most important variables in this model
+last_fit(final_xgb_selected_lch, split = df_split_xg) %>%   
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+#### XGB model with variables of lasso4lch
+```{r}
+# create recipe 
+recipe_xgb_lasso4lch <- 
+  recipe(mlb_debut ~ bats_B + bats_L + bats_R + age + bmi + overall_pick + team_ANA + team_ARI + team_ATL + team_BAL + team_BOS + team_CHA + team_CHN + team_CIN + team_CLE + team_COL + team_DET + team_HOU + team_KCA + team_LAN + team_MIA + team_MIL +  team_MIN + team_MON + team_NYA + team_NYN + team_OAK + team_PHI + team_PIT + team_SDN + team_SEA + team_SFN + team_SLN + team_TBA + team_TEX + team_TOR + team_WAS + avg + slg + ops + bb_so +sbr + ab, data = df_train_xg) %>% 
+  step_zv(all_predictors())
+
+
+# create workflow
+xgb_workflow_lasso4lch <- workflow() %>% 
+  add_recipe(recipe_xgb_lasso4lch) %>% 
+  add_model(xgb_spec)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+xgb_res_lasso4lch <- tune_grid(
+  xgb_workflow_lasso4lch,
+  resamples = dfa_folds_xgb,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_auc_lasso4lch <- select_best(xgb_res_lasso4lch, "roc_auc")
+best_auc_lasso4lch
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_xgb_lasso4lch <- finalize_workflow(
+  xgb_workflow_lasso4lch,
+  best_auc_lasso4lch
+)
+```
+
+```{r}
+#Fit the tuned model in training data
+fit_xgb_lasso4lch <-fit(final_xgb_lasso4lch, data = df_train_xg)
+```
+
+```{r}
+# Apply model in the testing data
+results_xgb_lasso4lch <- 
+  predict(fit_xgb_lasso4lch, df_test_xg, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_xg, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_xgb_lasso4lch <- conf_mat(results_xgb_lasso4lch, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_xgb_lasso4lch, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_xgb_lasso4lch, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_xgb_lasso4lch, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+#Plot predicted probability vs OPS
+results_xgb_lasso4lch %>% 
+  ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+#Find out top10 most important variables in this model
+last_fit(fit_xgb_lasso4lch, split = df_split_xg) %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+
+## Random Forest
+```{r}
+# Prepare dataset for Random Forest
+df_mlb_ranfor <- df_mlb %>% 
+  select(-name, -highLevel, -school) %>% # Remove variables of name, high-level and school
+  fastDummies::dummy_cols(select_columns = c( 'team', 'schooltype', 'bats', 'throws', 'position', 'sch_reg', 'birth_place'), remove_selected_columns = TRUE) # Converting the categorical variable into dummies
+
+str(df_mlb_ranfor)
+```
+
+```{r}
+# Set the seed
+set.seed(123)
+
+# Split the data into train and test
+df_split_ranfor <- initial_split(df_mlb_ranfor, strata = mlb_debut) #strata argument can help the training and test data sets will keep roughly the same proportions of mlb_debut = yes and no as in the original data.
+df_train_ranfor <- training(df_split_ranfor)
+df_test_ranfor <- testing(df_split_ranfor)
+```
+
+```{r}
+# create cross-validation resample for tuning the model.
+set.seed(123)
+dfa_folds_ranfor <- vfold_cv(df_train_ranfor, v = 5, strata = mlb_debut)
+```
+
+```{r}
+# Create a random forest model object
+ranfor <- rand_forest(
+  mtry = tune(),
+  min_n = tune(),
+  trees = 1000) %>%
+  set_mode("classification") %>%
+  set_engine("ranger", importance = "impurity")  
+```
+
+```{r}
+# Set up possible values for these hyperparameters to try
+ranfor_grid <- grid_regular(
+  min_n(),
+  finalize(mtry(), df_train_ranfor),
+  levels = 5)
+
+ranfor_grid
+```
+
+
+#### Random Forest model with all variables
+```{r}
+# Create recipe
+recipe_ranfor_all <- 
+  recipe(mlb_debut ~ ., data = df_train_ranfor) %>% 
+  step_zv(all_predictors())
+
+# Create workflow
+ranfor_workflow_all <- workflow() %>% 
+  add_recipe(recipe_ranfor_all) %>% 
+  add_model(ranfor)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+ranfor_res_all <- tune_grid(
+  ranfor_workflow_all,
+  resamples = dfa_folds_ranfor,
+  grid = ranfor_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+ranfor_best_auc_all <- select_best(ranfor_res_all, "roc_auc")
+ranfor_best_auc_all
+```
+```{r}
+# Finalize our tuneable workflow with these parameter values.
+final_ranfor_all <- finalize_workflow(
+  ranfor_workflow_all,
+  ranfor_best_auc_all
+)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_ranfor_all <-fit(final_ranfor_all, data = df_train_ranfor)
+```
+
+```{r}
+# Apply model in the testing data
+results_ranfor_all <- 
+  predict(fit_ranfor_all, df_test_ranfor, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_ranfor, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_ranfor_all <- conf_mat(results_ranfor_all, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_ranfor_all, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_ranfor_all, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_ranfor_all, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_ranfor_all %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+last_fit(final_ranfor_all, split = df_split_xg) %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+#### Random Forest model with variables of lasso4all
+```{r}
+# Create recipe
+recipe_ranfor_lasso4all <- 
+  recipe(mlb_debut ~ ., data = df_train_ranfor) %>% 
+  step_rm(weight, year, round, g, r, b2, bb, pa, obp, slg, hr_ab, iso)  %>% 
+  step_zv(all_predictors())
+
+# Create workflow
+ranfor_workflow_lasso4all <- workflow() %>% 
+  add_recipe(recipe_ranfor_lasso4all) %>% 
+  add_model(ranfor)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+ranfor_res_lasso4all <- tune_grid(
+  ranfor_workflow_lasso4all,
+  resamples = dfa_folds_ranfor,
+  grid = ranfor_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+ranfor_best_auc_lasso4all <- select_best(ranfor_res_lasso4all, "roc_auc")
+ranfor_best_auc_lasso4all
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_ranfor_lasso4all <- finalize_workflow(
+  ranfor_workflow_lasso4all,
+  ranfor_best_auc_lasso4all)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_ranfor_lasso4all <-fit(final_ranfor_lasso4all, data = df_train_ranfor)
+```
+
+```{r}
+# Apply model in the testing data
+results_ranfor_lasso4all <- 
+  predict(fit_ranfor_lasso4all, df_test_ranfor, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_ranfor, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_ranfor_lasso4all <- conf_mat(results_ranfor_lasso4all, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_ranfor_lasso4all, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_ranfor_lasso4all, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_ranfor_lasso4all, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_ranfor_lasso4all %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+last_fit(final_ranfor_lasso4all, split = df_split_xg) %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+#### Random Forest model with expert-selected variables
+```{r}
+# Create recipe
+recipe_ranfor_selected_lch <- 
+  recipe(mlb_debut ~ bats_B + bats_L + bats_R + age + bmi  + round + overall_pick + team_ANA + team_ARI + team_ATL + team_BAL + team_BOS + team_CHA + team_CHN + team_CIN + team_CLE + team_COL + team_DET + team_HOU + team_KCA + team_LAN + team_MIA + team_MIL +  team_MIN + team_MON + team_NYA + team_NYN + team_OAK + team_PHI + team_PIT + team_SDN + team_SEA + team_SFN + team_SLN + team_TBA + team_TEX + team_TOR + team_WAS + avg + obp + slg + ops + iso + bb_so  + hr_ab +sbr + ab, data = df_train_ranfor) %>%
+  step_zv(all_predictors())
+
+# Create workflow
+ranfor_workflow_selected_lch <- workflow() %>% 
+  add_recipe(recipe_ranfor_selected_lch) %>% 
+  add_model(ranfor)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+ranfor_res_selected_lch <- tune_grid(
+  ranfor_workflow_selected_lch,
+  resamples = dfa_folds_ranfor,
+  grid = ranfor_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+ranfor_best_auc_selected_lch <- select_best(ranfor_res_selected_lch, "roc_auc")
+ranfor_best_auc_selected_lch
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_ranfor_selected_lch <- finalize_workflow(
+  ranfor_workflow_selected_lch,
+  ranfor_best_auc_selected_lch
+)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_ranfor_selected_lch <-fit(final_ranfor_selected_lch, data = df_train_ranfor)
+```
+
+```{r}
+# Apply model in the testing data
+results_ranfor_selected_lch <- 
+  predict(fit_ranfor_selected_lch, df_test_ranfor, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_ranfor, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_ranfor_selected_lch <- conf_mat(results_ranfor_selected_lch, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_ranfor_selected_lch, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_ranfor_selected_lch, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_ranfor_selected_lch, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_ranfor_selected_lch %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+last_fit(final_ranfor_selected_lch, split = df_split_xg) %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+#### Random Forest model with variables of Lasso4lch
+```{r}
+# Create recipe
+recipe_ranfor_lasso4lch <- 
+  recipe(mlb_debut ~ bats_B + bats_L + bats_R + age + bmi + overall_pick + team_ANA + team_ARI + team_ATL + team_BAL + team_BOS + team_CHA + team_CHN + team_CIN + team_CLE + team_COL + team_DET + team_HOU + team_KCA + team_LAN + team_MIA + team_MIL +  team_MIN + team_MON + team_NYA + team_NYN + team_OAK + team_PHI + team_PIT + team_SDN + team_SEA + team_SFN + team_SLN + team_TBA + team_TEX + team_TOR + team_WAS + avg + slg + ops + bb_so +sbr + ab, data = df_train_ranfor) %>% 
+  step_zv(all_predictors())
+
+# Create workflow
+ranfor_workflow_lasso4lch <- workflow() %>% 
+  add_recipe(recipe_ranfor_lasso4lch) %>% 
+  add_model(ranfor)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+dfa_folds_ranfor <- vfold_cv(df_train_ranfor)
+
+set.seed(123)
+ranfor_res_lasso4lch <- tune_grid(
+  ranfor_workflow_lasso4lch,
+  resamples = dfa_folds_ranfor,
+  grid = ranfor_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+ranfor_best_auc_lasso4lch <- select_best(ranfor_res_lasso4lch, "roc_auc")
+ranfor_best_auc_lasso4lch
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_ranfor_lasso4lch <- finalize_workflow(
+  ranfor_workflow_lasso4lch,
+  ranfor_best_auc_lasso4lch
+)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_ranfor_lasso4lch <-fit(final_ranfor_lasso4lch, data = df_train_ranfor)
+```
+
+```{r}
+# Apply model in the testing data
+results_ranfor_lasso4lch <- 
+  predict(fit_ranfor_lasso4lch, df_test_ranfor, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_ranfor, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_ranfor_lasso4lch <- conf_mat(results_ranfor_lasso4lch, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_ranfor_lasso4lch, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_ranfor_lasso4lch, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_ranfor_lasso4lch, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_ranfor_lasso4lch %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+last_fit(final_ranfor_lasso4lch, split = df_split_xg) %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+
+#### Decision Tree
+```{r}
+# Prepare dataset for Decision Tree
+df_mlb_dt <- df_mlb %>% 
+  select(-name, -highLevel, -school) %>%  # Remove variables of name, high-level and school
+  fastDummies::dummy_cols(select_columns = c( 'team', 'schooltype', 'bats', 'throws', 'position', 'sch_reg', 'birth_place'), remove_selected_columns = TRUE) # Converting the categorical variable into dummies
+
+str(df_mlb_dt)
+
+```
+
+```{r}
+# Set the seed
+set.seed(123)
+
+# Split the data into train and test
+df_split_dt <- initial_split(df_mlb_dt, strata = mlb_debut) #strata argument can help the training and test data sets will keep roughly the same proportions of mlb_debut = yes and no as in the original data.
+df_train_dt <- training(df_split_dt)
+df_test_dt <- testing(df_split_dt)
+```
+
+```{r}
+# create cross-validation resample for tuning the model.
+set.seed(123)
+dfa_folds_dt <- vfold_cv(df_train_dt, v = 5, strata = mlb_debut)
+```
+
+```{r}
+# Create a Decision Tree model object
+# model specification
+dt <- decision_tree(
+  tree_depth = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("rpart") %>% 
+  set_mode("classification") %>% 
+  translate()
+```
+
+```{r}
+# Set up possible values for these hyperparameters to try
+dt_grid <- grid_regular(
+  tree_depth(),
+  min_n(),
+  levels = 5)
+
+dt_grid
+```
+
+
+#### Decision Tree model with all variables
+```{r}
+# Create recipe 
+recipe_dt_all <- 
+  recipe(mlb_debut ~ ., data = df_train_dt) %>% 
+  step_zv(all_predictors())
+
+# Create workflow
+dt_workflow_all <- workflow() %>% 
+  add_recipe(recipe_dt_all) %>% 
+  add_model(dt)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+dt_res_all <- tune_grid(
+  dt_workflow_all,
+  resamples = dfa_folds_dt,
+  grid = dt_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_auc_all <- select_best(dt_res_all, "roc_auc")
+best_auc_all
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_dt_all <- finalize_workflow(
+  dt_workflow_all,
+  best_auc_all
+)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_dt_all <-fit(final_dt_all, data = df_train_dt)
+```
+
+```{r}
+# Apply model in the testing data
+results_dt_all <- 
+  predict(fit_dt_all, df_test_dt, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_dt, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_dt_all <- conf_mat(results_dt_all, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_dt_all, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_dt_all, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_dt_all, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_dt_all %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+last_fit(final_dt_all, split = df_split_dt) %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+#### Decision Tree model with variables of lasso4all
+```{r}
+# Create recipe 
+recipe_dt_lasso4all <- 
+  recipe(mlb_debut ~ ., data = df_train_dt) %>% 
+  step_rm(weight, year, round, g, r, b2, bb, pa, obp, slg, hr_ab, iso) %>% 
+  step_zv(all_predictors())
+
+# Create workflow
+dt_workflow_lasso4all <- workflow() %>% 
+  add_recipe(recipe_dt_lasso4all) %>% 
+  add_model(dt)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+dt_res_lasso4all <- tune_grid(
+  dt_workflow_lasso4all,
+  resamples = dfa_folds_dt,
+  grid = dt_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_auc_lasso4all <- select_best(dt_res_lasso4all, "roc_auc")
+best_auc_lasso4all
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_dt_lasso4all <- finalize_workflow(
+  dt_workflow_lasso4all,
+  best_auc_lasso4all)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_dt_lasso4all <-fit(final_dt_lasso4all, data = df_train_dt)
+```
+
+```{r}
+# Apply model in the testing data
+results_dt_lasso4all <- 
+  predict(fit_dt_lasso4all, df_test_dt, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_dt, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_dt_lasso4all <- conf_mat(results_dt_lasso4all, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_dt_lasso4all, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_dt_lasso4all, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_dt_lasso4all, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_dt_lasso4all %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+last_fit(final_dt_lasso4all, split = df_split_dt) %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+#### Decision Tree model with expert-selected variables
+```{r}
+# Create recipe 
+recipe_dt_lch <- 
+  recipe(mlb_debut ~ bats_B + bats_L + bats_R + age + bmi  + round + overall_pick + team_ANA + team_ARI + team_ATL + team_BAL + team_BOS + team_CHA + team_CHN + team_CIN + team_CLE + team_COL + team_DET + team_HOU + team_KCA + team_LAN + team_MIA + team_MIL +  team_MIN + team_MON + team_NYA + team_NYN + team_OAK + team_PHI + team_PIT + team_SDN + team_SEA + team_SFN + team_SLN + team_TBA + team_TEX + team_TOR + team_WAS + avg + obp + slg + ops + iso + bb_so  + hr_ab +sbr + ab, data = df_train_dt) %>% 
+  step_zv(all_predictors())
+
+# Create workflow
+dt_workflow_lch <- workflow() %>% 
+  add_recipe(recipe_dt_lch) %>% 
+  add_model(dt)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+dt_res_lch <- tune_grid(
+  dt_workflow_lch,
+  resamples = dfa_folds_dt,
+  grid = dt_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_auc_lch <- select_best(dt_res_lch, "roc_auc")
+best_auc_lch
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_dt_lch <- finalize_workflow(
+  dt_workflow_lch,
+  best_auc_lch)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_dt_lch <-fit(final_dt_lch, data = df_train_dt)
+```
+
+```{r}
+# Apply model in the testing data
+results_dt_lch <- 
+  predict(fit_dt_lch, df_test_dt, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_dt, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_dt_lch <- conf_mat(results_dt_lch, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_dt_lch, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_dt_lch, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_dt_lch, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_dt_lch %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+last_fit(final_dt_lch, split = df_split_dt) %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+#### Decision Tree model with variables of lasso4lch
+```{r}
+# Create recipe 
+recipe_dt_lasso4lch <- 
+  recipe(mlb_debut ~ bats_B + bats_L + bats_R + age + bmi + overall_pick + team_ANA + team_ARI + team_ATL + team_BAL + team_BOS + team_CHA + team_CHN + team_CIN + team_CLE + team_COL + team_DET + team_HOU + team_KCA + team_LAN + team_MIA + team_MIL +  team_MIN + team_MON + team_NYA + team_NYN + team_OAK + team_PHI + team_PIT + team_SDN + team_SEA + team_SFN + team_SLN + team_TBA + team_TEX + team_TOR + team_WAS + avg + slg + ops + bb_so +sbr + ab, data = df_train_dt) %>% 
+  step_zv(all_predictors())
+
+# Create workflow
+dt_workflow_lasso4lch <- workflow() %>% 
+  add_recipe(recipe_dt_lasso4lch) %>% 
+  add_model(dt)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+dt_res_lasso4lch <- tune_grid(
+  dt_workflow_lasso4lch,
+  resamples = dfa_folds_dt,
+  grid = dt_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_auc_lasso4lch <- select_best(dt_res_lasso4lch, "roc_auc")
+best_auc_lasso4lch
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_dt_lasso4lch <- finalize_workflow(
+  dt_workflow_lasso4lch,
+  best_auc_lasso4lch)
+```
+
+```{r}
+# Fit the tuned model in training data
+fit_dt_lasso4lch <-fit(final_dt_lasso4lch, data = df_train_dt)
+```
+
+```{r}
+# Apply model in the testing data
+results_dt_lasso4lch <- 
+  predict(fit_dt_lasso4lch, df_test_dt, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_dt, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_dt_lasso4lch <- conf_mat(results_dt_lasso4lch, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_dt_lasso4lch, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_dt_lasso4lch, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_dt_lasso4lch, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>% 
+  ggplot(aes(x = 1 - specificity,
+             y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_dt_lasso4lch %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+last_fit(final_dt_lasso4lch, split = df_split_dt) %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip::vip(num_features = 10)
+```
+
+
+
+#### Support Vector Machine
+```{r}
+# Prepare dataset for SVM
+df_mlb_svm <- df_mlb %>% 
+  select(-name, -highLevel, -school) %>% # Remove variables of name, high-level and school
+  fastDummies::dummy_cols(select_columns = c( 'team', 'schooltype', 'bats', 'throws', 'position', 'sch_reg', 'birth_place'), remove_selected_columns = TRUE) # Converting the categorical variable into dummies
+
+str(df_mlb_svm)
+```
+
+```{r}
+# Set the seed
+set.seed(123)
+
+# Split the data into train and test
+df_split_svm <- initial_split(df_mlb_svm, strata = mlb_debut) #strata argument can help the training and test data sets will keep roughly the same proportions of mlb_debut = yes and no as in the original data.
+df_train_svm <- training(df_split_svm)
+df_test_svm <- testing(df_split_svm)
+```
+
+```{r}
+# create cross-validation resample for tuning the model.
+set.seed(123)
+dfa_folds_svm <- vfold_cv(df_train_svm, v = 5, strata = mlb_debut)
+```
+
+```{r}
+# Create a SVM model object
+svm <- svm_rbf(
+  cost = tune(),
+  rbf_sigma = tune(),
+  margin = NULL,
+) %>% 
+  set_engine("kernlab") %>% 
+  set_mode("classification") %>% 
+  translate()
+```
+
+```{r}
+# Set up possible values for these hyperparameters to try
+svm_grid <-grid_regular(
+  cost(),
+  rbf_sigma(),
+  levels = 5)
+
+svm_grid
+```
+
+#### SVM model with all variables
+```{r}
+# Create recipe
+recipe_svm_all <- 
+  recipe(mlb_debut ~ ., data = df_train_svm) %>% 
+  step_zv(all_predictors())
+```
+
+```{r}
+# Create workflow
+svm_workflow_all <-
+  workflow() %>% 
+  add_recipe(recipe_svm_all) %>%
+  add_model(svm)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+svm_reg_all <- tune_grid(
+  svm_workflow_all,
+  resamples = dfa_folds_svm,
+  grid = svm_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_svm_all <- svm_reg_all %>%
+  select_best("roc_auc")
+
+best_svm_all
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_wf_svm_all <- 
+  svm_workflow_all %>% 
+  finalize_workflow(best_svm_all)
+```
+
+```{r}
+# Fit the tuned model in training data
+final_fit_svm_all <- 
+  fit(final_wf_svm_all, df_train_svm) 
+```
+
+```{r}
+# Apply model in the testing data
+results_svm_prob_all <- 
+  predict(final_fit_svm_all, df_test_svm, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_svm, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_svm_all <- conf_mat(results_svm_prob_all, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_svm_all, event_level='second')
+```
+
+```{r}
+# AUC
+roc_auc(results_svm_prob_all, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_svm_prob_all, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>%
+    ggplot(aes(x = 1 - specificity,
+               y = sensitivity)) +
+      geom_path() +
+      geom_abline(lty = 3) +
+      coord_equal() +
+      theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_svm_prob_all %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+set.seed(123)
+last_fit(final_wf_svm_all, split = df_split_svm) %>% 
+  pluck(".workflow", 1) %>%   
+  extract_fit_parsnip() %>% 
+  vip::vip(method = "permute", 
+      target = 'mlb_debut', 
+      metric = "accuracy",
+      num_features = 10,
+      pred_wrapper = kernlab::predict, train = df_train_svm)
+```
+
+
+#### SVM model with variables of lasso4all
+```{r}
+# Create recipe
+recipe_svm_lasso4all <- 
+  recipe(mlb_debut ~ ., data = df_train_svm) %>% 
+  step_rm(weight, year, round, g, r, b2, bb, pa, obp, slg, hr_ab, iso) %>% 
+  step_zv(all_predictors())
+```
+
+```{r}
+# Create workflow
+svm_workflow_lasso4all <-
+  workflow() %>% 
+  add_recipe(recipe_svm_lasso4all) %>%
+  add_model(svm)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+svm_reg_lasso4all <- tune_grid(
+  svm_workflow_lasso4all,
+  resamples = dfa_folds_svm,
+  grid = svm_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_svm_lasso4all <- svm_reg_lasso4all %>%
+  select_best("roc_auc")
+
+best_svm_all
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_wf_svm_lasso4all <- 
+  svm_workflow_lasso4all %>% 
+  finalize_workflow(best_svm_lasso4all)
+```
+
+```{r}
+# Fit the tuned model in training data
+final_fit_svm_lasso4all <- 
+  final_wf_svm_lasso4all %>%
+  fit(df_train_svm) 
+```
+
+```{r}
+# Apply model in the testing data
+results_svm_prob_lasso4all <- 
+  predict(final_fit_svm_lasso4all, df_test_svm, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_svm, Predicted_Probability = .) %>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_svm_lasso4all <- conf_mat(results_svm_prob_lasso4all, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_svm_lasso4all, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_svm_prob_lasso4all, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_svm_prob_lasso4all, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>%
+    ggplot(aes(x = 1 - specificity,
+               y = sensitivity)) +
+      geom_path() +
+      geom_abline(lty = 3) +
+      coord_equal() +
+      theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_svm_prob_lasso4all %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+set.seed(123)
+last_fit(final_wf_svm_lasso4all, split = df_split_svm) %>% 
+  pluck(".workflow", 1) %>%   
+  extract_fit_parsnip() %>% 
+  vip::vip(method = "permute", 
+      target = 'mlb_debut', 
+      metric = "accuracy",
+      num_features = 10,
+      pred_wrapper = kernlab::predict, train = df_train_svm)
+```
+
+
+#### SVM model with expert-selected variables
+```{r}
+# Create recipe
+recipe_svm_selected_lch<- 
+  recipe(mlb_debut ~ bats_B + bats_L + bats_R + age + bmi  + round + overall_pick + team_ANA + team_ARI + team_ATL + team_BAL + team_BOS + team_CHA + team_CHN + team_CIN + team_CLE + team_COL + team_DET + team_HOU + team_KCA + team_LAN + team_MIA + team_MIL +  team_MIN + team_MON + team_NYA + team_NYN + team_OAK + team_PHI + team_PIT + team_SDN + team_SEA + team_SFN + team_SLN + team_TBA + team_TEX + team_TOR + team_WAS + avg + obp + slg + ops + iso + bb_so  + hr_ab +sbr + ab, data = df_train_svm) %>% 
+  step_zv(all_predictors())
+```
+
+```{r}
+# Create workflow
+svm_workflow_selected_lch <-
+  workflow() %>% 
+  add_recipe(recipe_svm_selected_lch) %>%
+  add_model(svm)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+svm_reg_selected_lch <- tune_grid(
+  svm_workflow_selected_lch,
+  resamples = dfa_folds_svm,
+  grid = svm_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_svm_selected_lch <- svm_reg_selected_lch %>%
+  select_best("roc_auc")
+
+best_svm_selected_lch
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_wf_svm_selected_lch <- 
+  svm_workflow_selected_lch %>% 
+  finalize_workflow(best_svm_selected_lch)
+```
+
+```{r}
+# Fit the tuned model in training data
+final_fit_svm_selected_lch <- 
+  final_wf_svm_selected_lch %>%
+  fit(df_train_svm) 
+```
+
+```{r}
+# Apply model in the testing data
+results_svm_prob_selected_lch <- 
+  predict(final_fit_svm_selected_lch, df_test_svm, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_svm, Predicted_Probability = .)%>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_svm_selected_lch <- conf_mat(results_svm_prob_selected_lch, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_svm_selected_lch, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_svm_prob_selected_lch, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_svm_prob_selected_lch, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>%
+    ggplot(aes(x = 1 - specificity,
+               y = sensitivity)) +
+      geom_path() +
+      geom_abline(lty = 3) +
+      coord_equal() +
+      theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_svm_prob_selected_lch %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+set.seed(123)
+last_fit(final_wf_svm_selected_lch, split = df_split_svm) %>% 
+  pluck(".workflow", 1) %>%   
+  extract_fit_parsnip() %>% 
+  vip::vip(method = "permute", 
+      target = 'mlb_debut', 
+      metric = "accuracy",
+      num_features = 10,
+      pred_wrapper = kernlab::predict, train = df_train_svm)
+```
+
+
+#### SVM model with variables of Lasso4lch
+```{r}
+# Create recipe
+recipe_svm_lasso4lch<- 
+  recipe(mlb_debut ~ bats_B + bats_L + bats_R + age + bmi + overall_pick + team_ANA + team_ARI + team_ATL + team_BAL + team_BOS + team_CHA + team_CHN + team_CIN + team_CLE + team_COL + team_DET + team_HOU + team_KCA + team_LAN + team_MIA + team_MIL +  team_MIN + team_MON + team_NYA + team_NYN + team_OAK + team_PHI + team_PIT + team_SDN + team_SEA + team_SFN + team_SLN + team_TBA + team_TEX + team_TOR + team_WAS + avg + slg + ops + bb_so +sbr + ab, data = df_train_svm) %>% 
+  step_zv(all_predictors())
+```
+
+```{r}
+# Create workflow
+svm_workflow_lasso4lch <-
+  workflow() %>% 
+  add_recipe(recipe_svm_lasso4lch) %>%
+  add_model(svm)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = parallel::detectCores()) #to parallel process and speed up tuning
+
+set.seed(123)
+svm_reg_lasso4lch <- tune_grid(
+  svm_workflow_lasso4lch,
+  resamples = dfa_folds_svm,
+  grid = svm_grid,
+  control = control_grid(save_pred = TRUE))
+
+doParallel::stopImplicitCluster() # to stop parallel processing
+```
+
+```{r}
+# Selecting the best hyperparameter by the value of AUC
+best_svm_lasso4lch <- svm_reg_lasso4lch %>%
+  select_best("roc_auc")
+
+best_svm_lasso4lch
+```
+
+```{r}
+# Finalize the tuneable workflow with the best parameter values.
+final_wf_svm_lasso4lch <- 
+  svm_workflow_lasso4lch %>% 
+  finalize_workflow(best_svm_lasso4lch)
+```
+
+```{r}
+# Fit the tuned model in training data
+final_fit_svm_lasso4lch <- 
+  final_wf_svm_lasso4lch %>%
+  fit(df_train_svm) 
+```
+
+```{r}
+# Apply model in the testing data
+results_svm_prob_lasso4lch <- 
+  predict(final_fit_svm_lasso4lch, df_test_svm, type = 'prob') %>% 
+  pluck(2) %>% 
+  bind_cols(df_test_svm, Predicted_Probability = .)%>% 
+  mutate(predictedClass = as.factor(ifelse(Predicted_Probability > 0.5, 'yes', 'no')))
+```
+
+```{r}
+# Print out performances of confusion matrix
+conf_mat_svm_lasso4lch <- conf_mat(results_svm_prob_lasso4lch, truth = mlb_debut, estimate = predictedClass)
+
+summary(conf_mat_svm_lasso4lch, event_level='second')
+```
+
+```{r}
+# AUC value
+roc_auc(results_svm_prob_lasso4lch, truth = mlb_debut, Predicted_Probability, event_level = 'second')
+```
+
+```{r}
+# Plot ROC
+roc_curve(results_svm_prob_lasso4lch, truth = mlb_debut,
+          Predicted_Probability,
+          event_level = 'second') %>%
+    ggplot(aes(x = 1 - specificity,
+               y = sensitivity)) +
+      geom_path() +
+      geom_abline(lty = 3) +
+      coord_equal() +
+      theme_bw()
+```
+
+```{r}
+# Plot predicted probability vs OPS
+results_svm_prob_lasso4lch %>% 
+ggplot()+
+  geom_point(aes(x = ops, y = Predicted_Probability, color=mlb_debut))+
+  labs(x = "OPS", y = "Predicted Probability", color = "MLB")+
+  theme_light()+
+  scale_color_manual(values = c("#FFD520", "#E03A3E"), limits = c("yes", "no"))
+```
+
+```{r}
+# Find out top10 most important variables in this model
+set.seed(123)
+last_fit(final_wf_svm_lasso4lch, split = df_split_svm) %>% 
+  pluck(".workflow", 1) %>%   
+  extract_fit_parsnip() %>% 
+  vip::vip(method = "permute", 
+      target = 'mlb_debut', 
+      metric = "accuracy",
+      num_features = 10,
+      pred_wrapper = kernlab::predict, train = df_train_svm)
+```
