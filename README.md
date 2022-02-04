@@ -3,6 +3,8 @@ From MiLB to MLB Debut: a Machine Learning Approach
 Chung-Hao Lee
 01/05/2022
 
+<!-- README.md is generated from "From-MiLB-to-MLB-Debut-a-Machine-Learning-Approach.Rmd". Please edit that file --> 
+
 ``` r
 #loading libraries
 library("tidyverse") # for data processing
