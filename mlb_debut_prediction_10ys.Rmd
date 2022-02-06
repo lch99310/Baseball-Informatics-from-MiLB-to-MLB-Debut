@@ -1,5 +1,5 @@
 ---
-title: 'From MiLB to MLB Debut: a Machine Learning Approach'
+title: 'From MiLB to MLB Debut: a Machine Learning Application'
 author: "Chung-Hao Lee"
 date: "01/05/2022"
 output:
