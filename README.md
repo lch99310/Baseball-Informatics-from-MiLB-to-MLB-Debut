@@ -96,7 +96,7 @@ knitr::opts_chunk$set(
 ``` r
 #loading dataset and do data preparation
 df_mlb <-
-  read_csv("/Users/yginger/Desktop/Maryland/GA/Adam/Fall 2021/MLB_debut_prediction/data/mlb_draft_01to10.csv") %>% 
+  read_csv("/.../mlb_draft_01to10.csv") %>% 
   mutate(mlb_debut = as.factor(mlb_debut),
          sch_reg = as.factor(sch_reg),
          birth_place = as.factor(birth_place),
