@@ -1,4 +1,4 @@
-Baseball Informatics – from MiLB to MLB Debut![image](https://user-images.githubusercontent.com/85670791/186123477-7f784aaa-8d34-4c52-90a3-758530513529.png)
+[image](https://user-images.githubusercontent.com/85670791/186123477-7f784aaa-8d34-4c52-90a3-758530513529.png)
 
 ================
 Chung-Hao Lee
