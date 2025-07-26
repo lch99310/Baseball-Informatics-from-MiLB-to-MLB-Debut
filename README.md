@@ -115,6 +115,6 @@ Potential extensions include ensemble modeling approaches, temporal analysis of 
 
 ---
 
-**License**: [Specify License]  
-**Contact**: [Your Contact Information]  
-**Last Updated**: [Current Date]
+**License**: MIT
+**Contact**: lch99310@gmail.com 
+**Last Updated**: July 27, 2025
